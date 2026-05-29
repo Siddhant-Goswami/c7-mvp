@@ -29,16 +29,16 @@ The interface is replaceable. The system is the asset.
    pip install -r requirements.txt
    ```
 
-2. Set your Anthropic API key as an environment variable. Never paste the key into the code.
+2. Set your GroqCloud API key as an environment variable. Never paste the key into the code. Get one at https://console.groq.com/keys.
 
    macOS / Linux:
    ```
-   export ANTHROPIC_API_KEY=your_key_here
+   export GROQ_API_KEY=your_key_here
    ```
 
    Windows PowerShell:
    ```
-   setx ANTHROPIC_API_KEY "your_key_here"
+   setx GROQ_API_KEY "your_key_here"
    ```
    (Open a new terminal after `setx` so it picks up the value.)
 
@@ -80,14 +80,12 @@ Each app prints a local URL. Open it in your browser.
 Change one line in `diagnoser.py`:
 
 ```python
-MODEL = "claude-haiku-4-5"
+MODEL = "llama-3.3-70b-versatile"
 ```
 
 Nothing else has to change. That is the contract doing its job.
 
 ## The build, commit by commit
-
-This repo was rebuilt to match the lecture's live-build flow. Each step is one commit, so you can teach off the diff:
 
 | Step | What happens |
 |------|--------------|

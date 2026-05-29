@@ -10,11 +10,12 @@ designed answer for it. The states are outputs too.
 """
 
 import json
-from anthropic import Anthropic
+import os
+from groq import Groq
 
-MODEL = "claude-haiku-4-5"
+MODEL = "llama-3.3-70b-versatile"
 
-client = Anthropic()
+client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 PROMPT = """You are a workflow diagnosis assistant.
 The user will describe one repeated task they do at work.
@@ -65,14 +66,15 @@ def diagnose(description):
         return {"ok": False, "error": error}
 
     try:
-        message = client.messages.create(
+        completion = client.chat.completions.create(
             model=MODEL,
             max_tokens=1024,
+            response_format={"type": "json_object"},
             messages=[
                 {"role": "user", "content": PROMPT.format(description=description)}
             ],
         )
-        raw = message.content[0].text
+        raw = completion.choices[0].message.content
         data = json.loads(_clean(raw))
         return {"ok": True, "diagnosis": data}
     except json.JSONDecodeError:
