@@ -1,6 +1,5 @@
-groq
-gradio
-streamlit
 fastapi
 uvicorn
+groq
+gradio
 requests
