@@ -85,6 +85,37 @@ MODEL = "llama-3.3-70b-versatile"
 
 Nothing else has to change. That is the contract doing its job.
 
+## Lecture 05 — the backend (FastAPI)
+
+L04 left the logic and the interface in the same process. L05 splits them: a
+private **backend** holds the key and the brain, and a thin **frontend** calls it
+over the internet.
+
+```
+app_frontend.py  ← thin Gradio, public, no secret in it
+      |  HTTP POST /diagnose
+      v
+main.py          ← FastAPI backend, private, holds GROQ_API_KEY, calls Groq
+```
+
+- **`main.py`** — the FastAPI backend. `GET /` is a Hello World; `POST /diagnose`
+  enforces the contract with Pydantic and runs the diagnosis. Open `/docs` for the
+  auto-generated, clickable contract.
+- **`app_frontend.py`** — the thin Gradio frontend. Reads `BACKEND_URL` from the
+  environment and calls your backend. No key anywhere in it.
+- **`Dockerfile`** — runs the backend on a Hugging Face Docker Space (port 7860).
+- **`LECTURE_05_GUIDE.md`** — a step-by-step, exercise-driven walkthrough of every
+  concept in the lecture, mapped to the code in this repo.
+
+Run it locally (two terminals):
+
+```
+uvicorn main:app --reload     # terminal 1: backend on http://127.0.0.1:8000
+python app_frontend.py        # terminal 2: frontend, calls the backend
+```
+
+Open `http://127.0.0.1:8000/docs` to read and call the contract directly.
+
 ## The build, commit by commit
 
 | Step | What happens |
