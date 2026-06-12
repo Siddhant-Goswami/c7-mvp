@@ -1,7 +1,9 @@
 import os
 
+from typing import Optional
+
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import PlainTextResponse
 from groq import Groq
 from supabase import create_client
@@ -28,6 +30,28 @@ def read_root():
     return {"message": "Hello, builder"}
 
 
+def get_user_id(authorization: Optional[str] = Header(default=None)) -> Optional[str]:
+    """Who is asking? Read the identity from the JWT — never trust a claim in
+    the request body.
+
+    The frontend runs on a machine THEY control, so anything it *says* ("I am
+    Aarav") can be forged. The JWT is a passport signed by Supabase: we hand the
+    token back to Supabase, and it tells us the real user id.
+
+    We keep this OPTIONAL so the thin L06 frontend (which sends no token) still
+    works: no header -> no user_id. In production you would make it required by
+    using `Header(...)` and rejecting a missing token. A *bad* token is always
+    rejected.
+    """
+    if authorization is None:
+        return None
+    token = authorization.replace("Bearer ", "")
+    res = supabase.auth.get_user(token)
+    if res is None or res.user is None:
+        raise HTTPException(status_code=401, detail="Who are you?")
+    return res.user.id
+
+
 def call_groq(user_content: str) -> str:
     """The L06 brain, unchanged: ask the LLM for a diagnosis."""
     completion = client.chat.completions.create(
@@ -49,15 +73,16 @@ def call_groq(user_content: str) -> str:
 
 
 @app.post("/diagnose", response_class=PlainTextResponse)
-def diagnose(body: dict):
+def diagnose(body: dict, user_id: Optional[str] = Depends(get_user_id)):
     user_content = body.get("workflow_description", "")
 
     # Four beats: open a conversation, store the question, think, store the answer.
     # We wrap MEMORY around last week's brain — we don't replace it.
 
-    # 1. open a conversation (the domain-model "conversation" gets a row)
+    # 1. open a conversation (the domain-model "conversation" gets a row).
+    #    Stamp it with the caller's user_id from the JWT, so we know who owns it.
     convo = supabase.table("conversations").insert(
-        {"title": user_content[:60]}
+        {"title": user_content[:60], "user_id": user_id}
     ).execute()
     conversation_id = convo.data[0]["id"]
 

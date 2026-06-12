@@ -19,7 +19,7 @@ create table if not exists conversations (
     id          uuid        primary key default gen_random_uuid(),  -- identity: meaningless + permanent
     title       text,                                               -- nullable label, e.g. first 60 chars
     created_at  timestamptz not null default now()                  -- when it started
-    -- user_id is added later, in the Auth step (03_auth.sql). One thing at a time.
+    -- user_id is added later, in the Auth step (02_auth.sql). One thing at a time.
 );
 
 
