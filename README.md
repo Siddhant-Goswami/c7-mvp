@@ -313,6 +313,61 @@ Now anyone can use your app, and your key never leaves Render.
 
 ---
 
+## Step 7 — Give it a memory (Supabase database)
+
+Right now the app forgets. Close the tab and the plan is gone, because it only
+ever lived in RAM — in the browser tab and in the server process. This step
+moves the plan onto **disk** in a real Postgres database (via Supabase), so it
+survives a closed tab and a server restart.
+
+```
+  Browser → app_frontend.py → main.py ──calls──► Groq (the AI)
+                                  │
+                                  └──writes/reads rows──► Supabase (Postgres)
+                                         (holds SUPABASE_SERVICE_ROLE_KEY)
+```
+
+The work is split into small, readable files. Read them in order:
+
+1. **`DOMAIN_MODEL.md`** — the shape of what we store: two entities
+   (`conversation`, `message`), their attributes, the one-to-many relationship,
+   and an ER diagram. *Model it before you store it.*
+2. **`db/01_schema.sql`** — the model as real tables, with a **foreign key** and
+   a **check constraint**. Includes the "ghost message" demo where the database
+   refuses a bad row on purpose.
+3. **`db/02_auth.sql`** — add a `user_id` so we know *who owns* each conversation,
+   and meet the JWT "passport."
+4. **`db/03_policies.sql`** — Row-Level Security: the rule "only read your own
+   rows" moves into the database itself, deny-by-default.
+
+### Set it up
+
+1. Create a free project at [supabase.com](https://supabase.com) (region close
+   to you). Save the database password.
+2. In the Supabase **SQL Editor**, run `db/01_schema.sql`, then `db/02_auth.sql`,
+   then `db/03_policies.sql`, in order.
+3. Copy `.env.example` to `.env` and fill in `SUPABASE_URL` and
+   `SUPABASE_SERVICE_ROLE_KEY` (from **Settings → API**) alongside your
+   `GROQ_API_KEY`.
+4. Install the new libraries and run the backend:
+
+   ```bash
+   pip install -r requirements.txt
+   uvicorn main:app --reload
+   ```
+
+5. **Prove the memory survives.** Open `http://127.0.0.1:8000/docs`, run one
+   `/diagnose`. Check the Supabase **Table Editor** — three new rows. Now stop
+   the server (`Ctrl+C`), start it again, and call
+   `GET /conversations/{conversation_id}/messages`. The messages are still there.
+
+> **The two keys.** `service_role` is the master key — it lives only in your
+> backend's `.env` / Render env vars and bypasses every rule. `anon` is the
+> public key meant for frontends; it is safe *only because* RLS guards every row.
+> Never put `service_role` anywhere a browser can see it.
+
+---
+
 ## Where to go next
 
 - Change the **system prompt** in `main.py` to make the AI an expert in
