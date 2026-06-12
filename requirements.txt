@@ -3,3 +3,5 @@ uvicorn
 groq
 gradio
 requests
+supabase
+python-dotenv

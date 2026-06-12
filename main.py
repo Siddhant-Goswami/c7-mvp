@@ -1,10 +1,27 @@
 import os
 
-from fastapi import FastAPI
+from typing import Optional
+
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import PlainTextResponse
 from groq import Groq
+from supabase import create_client
+
+# Read SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GROQ_API_KEY from the .env file
+# into the environment. (On Render these come from the dashboard instead.)
+load_dotenv()
 
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+
+# Connect to the database. We use the SERVICE_ROLE key because this file runs on
+# the server — the machine WE control. This key bypasses every rule, so it must
+# never leave the server and never appear in the frontend. (The `anon` key is
+# the public one; it is not used here.)
+supabase = create_client(
+    os.environ["SUPABASE_URL"],
+    os.environ["SUPABASE_SERVICE_ROLE_KEY"],
+)
 
 app = FastAPI(title="Workflow Diagnoser API")
 
@@ -12,9 +29,31 @@ app = FastAPI(title="Workflow Diagnoser API")
 def read_root():
     return {"message": "Hello, builder"}
 
-@app.post("/diagnose", response_class=PlainTextResponse)
-def diagnose(body: dict):
-    user_content = body.get("workflow_description", "")
+
+def get_user_id(authorization: Optional[str] = Header(default=None)) -> Optional[str]:
+    """Who is asking? Read the identity from the JWT — never trust a claim in
+    the request body.
+
+    The frontend runs on a machine THEY control, so anything it *says* ("I am
+    Aarav") can be forged. The JWT is a passport signed by Supabase: we hand the
+    token back to Supabase, and it tells us the real user id.
+
+    We keep this OPTIONAL so the thin L06 frontend (which sends no token) still
+    works: no header -> no user_id. In production you would make it required by
+    using `Header(...)` and rejecting a missing token. A *bad* token is always
+    rejected.
+    """
+    if authorization is None:
+        return None
+    token = authorization.replace("Bearer ", "")
+    res = supabase.auth.get_user(token)
+    if res is None or res.user is None:
+        raise HTTPException(status_code=401, detail="Who are you?")
+    return res.user.id
+
+
+def call_groq(user_content: str) -> str:
+    """The L06 brain, unchanged: ask the LLM for a diagnosis."""
     completion = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         max_tokens=1024,
@@ -31,3 +70,56 @@ def diagnose(body: dict):
         ],
     )
     return completion.choices[0].message.content
+
+
+@app.post("/diagnose", response_class=PlainTextResponse)
+def diagnose(body: dict, user_id: Optional[str] = Depends(get_user_id)):
+    user_content = body.get("workflow_description", "")
+
+    # Four beats: open a conversation, store the question, think, store the answer.
+    # We wrap MEMORY around last week's brain — we don't replace it.
+
+    # 1. open a conversation (the domain-model "conversation" gets a row).
+    #    Stamp it with the caller's user_id from the JWT, so we know who owns it.
+    convo = supabase.table("conversations").insert(
+        {"title": user_content[:60], "user_id": user_id}
+    ).execute()
+    conversation_id = convo.data[0]["id"]
+
+    # 2. store what the user said
+    supabase.table("messages").insert({
+        "conversation_id": conversation_id,
+        "role": "user",
+        "content": user_content,
+    }).execute()
+
+    # 3. think (the L06 logic, untouched)
+    plan = call_groq(user_content)
+
+    # 4. store what the model answered
+    supabase.table("messages").insert({
+        "conversation_id": conversation_id,
+        "role": "assistant",
+        "content": plan,
+    }).execute()
+
+    # The plan still comes back as plain text, so the L06 frontend keeps working.
+    # The new conversation_id is also returned in a header for anyone who wants it.
+    return PlainTextResponse(plan, headers={"X-Conversation-Id": conversation_id})
+
+
+@app.get("/conversations/{conversation_id}/messages")
+def get_messages(conversation_id: str):
+    """Read a conversation's history back — the proof that memory survives.
+
+    Restart the server, then call this endpoint: the messages are still here,
+    because they live on disk in Postgres, not in this process's RAM.
+    """
+    result = (
+        supabase.table("messages")
+        .select("role, content, created_at")
+        .eq("conversation_id", conversation_id)  # only THIS conversation
+        .order("created_at")                      # oldest first, in order
+        .execute()
+    )
+    return result.data
