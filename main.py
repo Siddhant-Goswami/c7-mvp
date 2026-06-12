@@ -81,3 +81,20 @@ def diagnose(body: dict):
     # The plan still comes back as plain text, so the L06 frontend keeps working.
     # The new conversation_id is also returned in a header for anyone who wants it.
     return PlainTextResponse(plan, headers={"X-Conversation-Id": conversation_id})
+
+
+@app.get("/conversations/{conversation_id}/messages")
+def get_messages(conversation_id: str):
+    """Read a conversation's history back — the proof that memory survives.
+
+    Restart the server, then call this endpoint: the messages are still here,
+    because they live on disk in Postgres, not in this process's RAM.
+    """
+    result = (
+        supabase.table("messages")
+        .select("role, content, created_at")
+        .eq("conversation_id", conversation_id)  # only THIS conversation
+        .order("created_at")                      # oldest first, in order
+        .execute()
+    )
+    return result.data
