@@ -268,10 +268,43 @@ are structured.
 
 ---
 
-## Step 6 — Deploy it (optional)
+## Step 6 — Deploy it, right-sized (find the real bottleneck)
 
-Want it live on the internet? Deploy the two halves separately. One free,
-common combo:
+It's perfect on localhost and useless to the world. The interesting question
+isn't *how* to ship — it's *how big* to build. This is where most people
+over-engineer: they reach for Kubernetes, autoscaling, a load balancer, Redis,
+a queue… for an app nobody is using yet.
+
+**Do the napkin math first.** Say we expect ~250 users, a few diagnoses each.
+That's maybe 500–1,000 requests total, a few thousand short rows, a few
+megabytes. Now hold that next to the free-tier ceilings:
+
+| Layer | Free-tier ceiling that matters | Our 250-user load | Headroom |
+| --- | --- | --- | --- |
+| Supabase Postgres | ~500 MB (≈ 5M short messages) | a few MB | a rounding error |
+| Supabase Auth | 50,000 monthly active users | 250 | ~0.5% of the ceiling |
+| Groq LLM (`llama-3.3-70b-versatile`) | ~30 requests/min, ~1,000/day | 250 people clicking at once | **this is the one** |
+
+**Conclusion, derived not asserted:** we need *none* of the things people
+reach for. Over-engineering is paying in complexity for load you don't have.
+
+**The limit that breaks you first is never the one you'd guess.** It isn't users
+and it isn't storage. There are exactly two tripwires for this stack, and both
+live *outside your own code*:
+
+1. **The free database falls asleep** after ~7 days of no traffic and takes
+   ~30 seconds to wake. That's an *operational* tripwire, not a scale one. The
+   fix is a daily ping that keeps it warm, not a bigger plan.
+2. **The LLM rate limit** is the one that bites in a real launch. ~30
+   requests/min means if all 250 users press *diagnose* in the same minute,
+   only 30 get through and the rest get a `429`. Your bottleneck is an external
+   dependency. The fix is to throttle, queue, or upgrade *that one tier* — not
+   to scale your box.
+
+> Numbers move. Reconfirm on Groq's rate-limit docs and Supabase's pricing page
+> before you architect around any specific cap.
+
+Now deploy the two halves separately.
 
 ### Backend → Render
 
@@ -281,7 +314,8 @@ common combo:
    ```bash
    uvicorn main:app --host 0.0.0.0 --port $PORT
    ```
-4. Under **Environment**, add `GROQ_API_KEY` = your key.
+4. Under **Environment**, add three variables: `GROQ_API_KEY`, `SUPABASE_URL`,
+   and `SUPABASE_SERVICE_ROLE_KEY` (the same values from your `.env`).
 5. Deploy. Render gives you a URL like
    `https://your-service.onrender.com`. Your endpoint is that URL + `/diagnose`.
 
@@ -296,6 +330,11 @@ common combo:
 4. The Space builds and gives you a public chat link to share.
 
 Now anyone can use your app, and your key never leaves Render.
+
+> **Keep it warm.** Free hosts and the free database both sleep on idle, so the
+> first request after a quiet spell is slow. Before a live demo, hit the URL
+> once to wake it. For the database's 7-day pause, a tiny daily cron that calls
+> `/` is enough — you're mitigating the exact tripwire you just learned to name.
 
 ---
 
