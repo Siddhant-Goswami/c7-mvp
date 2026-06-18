@@ -1,4 +1,5 @@
 import os
+import time
 
 from typing import Optional
 
@@ -52,9 +53,16 @@ def get_user_id(authorization: Optional[str] = Header(default=None)) -> Optional
     return res.user.id
 
 
-def call_groq(user_content: str) -> str:
-    """The L06 brain, unchanged: ask the LLM for a diagnosis."""
-    completion = client.chat.completions.create(
+def call_groq(user_content: str):
+    """The L06 brain, now wearing a meter.
+
+    Returns (text, meta). `meta` carries the numbers the dashboard needs:
+    how many tokens we spent, and — crucially — how many requests Groq will
+    still let us make this minute. We read that from the RAW response headers
+    (`with_raw_response`), because the limit that breaks a launch first is the
+    LLM rate cap, and you can only watch a budget drain if you read it.
+    """
+    raw = client.chat.completions.with_raw_response.create(
         model="llama-3.3-70b-versatile",
         max_tokens=1024,
         messages=[
@@ -69,12 +77,38 @@ def call_groq(user_content: str) -> str:
             {"role": "user", "content": user_content},
         ],
     )
-    return completion.choices[0].message.content
+    # Groq reports your remaining budget in a response header.
+    remaining = raw.headers.get("x-ratelimit-remaining-requests")
+    completion = raw.parse()  # the normal object you're used to
+    meta = {
+        "input_tokens": completion.usage.prompt_tokens,
+        "output_tokens": completion.usage.completion_tokens,
+        "groq_remaining_rpm": int(remaining) if remaining is not None else None,
+    }
+    return completion.choices[0].message.content, meta
+
+
+def log_event(route, status, latency_ms, user_id=None, meta=None):
+    """Write one row to the `events` table — the whole observability story.
+
+    No new infra: the same database that gives us MEMORY now gives us METRICS.
+    """
+    meta = meta or {}
+    supabase.table("events").insert({
+        "route": route,
+        "status": status,
+        "latency_ms": latency_ms,
+        "user_id": user_id,
+        "input_tokens": meta.get("input_tokens"),
+        "output_tokens": meta.get("output_tokens"),
+        "groq_remaining_rpm": meta.get("groq_remaining_rpm"),
+    }).execute()
 
 
 @app.post("/diagnose", response_class=PlainTextResponse)
 def diagnose(body: dict, user_id: Optional[str] = Depends(get_user_id)):
     user_content = body.get("workflow_description", "")
+    started = time.time()  # start the stopwatch so we can log latency
 
     # Four beats: open a conversation, store the question, think, store the answer.
     # We wrap MEMORY around last week's brain — we don't replace it.
@@ -93,8 +127,8 @@ def diagnose(body: dict, user_id: Optional[str] = Depends(get_user_id)):
         "content": user_content,
     }).execute()
 
-    # 3. think (the L06 logic, untouched)
-    plan = call_groq(user_content)
+    # 3. think (the L06 logic, now also handing back metrics)
+    plan, meta = call_groq(user_content)
 
     # 4. store what the model answered
     supabase.table("messages").insert({
@@ -102,6 +136,10 @@ def diagnose(body: dict, user_id: Optional[str] = Depends(get_user_id)):
         "role": "assistant",
         "content": plan,
     }).execute()
+
+    # 5. record what just happened: a 200, how long it took, what it cost.
+    latency_ms = int((time.time() - started) * 1000)
+    log_event("/diagnose", 200, latency_ms, user_id, meta)
 
     # The plan still comes back as plain text, so the L06 frontend keeps working.
     # The new conversation_id is also returned in a header for anyone who wants it.
