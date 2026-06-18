@@ -53,6 +53,44 @@ def get_user_id(authorization: Optional[str] = Header(default=None)) -> Optional
     return res.user.id
 
 
+# ---------------------------------------------------------------------------
+#  Two prompts, one machine. The architecture never moves — only what the
+#  product is FOR. Changing that is a one-line change, because we own the
+#  shape now, not just the app. We ship BOTH prompts and flip a flag, so the
+#  reveal is one keystroke with no redeploy (a redeploy risks a cold start).
+# ---------------------------------------------------------------------------
+
+WORKFLOW_PROMPT = (
+    "You are a workflow diagnosis assistant. Analyze the described workflow and "
+    "respond in plain text with repeatable steps, automation opportunities, and "
+    "a suggested MVP."
+)
+
+JOURNEY_PROMPT = (
+    "You are a builder-journey diagnostician for 100xEngineers. The person describes "
+    "where they are, what they are trying to build or learn, and what feels stuck. "
+    "Do four things, in plain text, in this order. "
+    "First, locate them on the builder ladder: Consumer (uses AI tools), Assisted "
+    "builder (builds with heavy help), Accelerated builder (builds fast with AI as a "
+    "force multiplier), Autonomous builder (directs agents to build), Ships to real "
+    "users (has shipped something people use). Name the single stage that fits best "
+    "and give one sentence of evidence from what they said. "
+    "Second, name the gap between where they are and where they want to go, concretely. "
+    "Third, name their single current bottleneck. Not a list. One. The one thing that, "
+    "if removed, unblocks the most. "
+    "Fourth, give one action they can take this week to remove it. "
+    "Be specific, kind, and short. Do not flatter. Do not hedge."
+)
+
+# Start in "workflow" mode. Env var sets the boot default; the /admin/mode
+# route flips it live, in memory, with zero latency.
+PROMPT_MODE = os.environ.get("PROMPT_MODE", "workflow")
+
+
+def current_system_prompt() -> str:
+    return JOURNEY_PROMPT if PROMPT_MODE == "journey" else WORKFLOW_PROMPT
+
+
 def call_groq(user_content: str):
     """The L06 brain, now wearing a meter.
 
@@ -66,14 +104,7 @@ def call_groq(user_content: str):
         model="llama-3.3-70b-versatile",
         max_tokens=1024,
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a workflow diagnosis assistant. Analyze the described workflow and "
-                    "respond in plain text with repeatable steps, automation opportunities, and "
-                    "a suggested MVP."
-                ),
-            },
+            {"role": "system", "content": current_system_prompt()},
             {"role": "user", "content": user_content},
         ],
     )
@@ -235,3 +266,20 @@ def admin():
       </script>
     </body></html>
     """
+
+
+@app.post("/admin/mode")
+def set_mode(mode: str):
+    """The reveal, in one call. Flip the product's purpose with no redeploy.
+
+    The architecture does not move: same auth, same RLS, same deploy, same
+    dashboard. Only the system prompt changes. That is the lesson — once you
+    own the shape, changing what a product DOES is a one-line change.
+
+        curl -X POST 'http://127.0.0.1:8000/admin/mode?mode=journey'
+    """
+    global PROMPT_MODE
+    if mode not in ("workflow", "journey"):
+        raise HTTPException(status_code=400, detail="mode must be 'workflow' or 'journey'")
+    PROMPT_MODE = mode
+    return {"mode": PROMPT_MODE}
