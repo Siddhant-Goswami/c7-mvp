@@ -407,6 +407,62 @@ The work is split into small, readable files. Read them in order:
 
 ---
 
+## Step 8 — See it working (observability)
+
+It's live. Is it working? For whom? How fast? When it breaks at 2am, what do
+you even look at? Right now: nothing. The Verifier's Rule, one level up — only
+**ship what you can observe.**
+
+And it needs **no new infrastructure.** The same Postgres is your analytics
+warehouse. Run `db/04_events.sql` to add one `events` table, then every
+`/diagnose` logs a row: latency, tokens, status, and how much Groq budget is
+left (read straight from Groq's rate-limit header).
+
+Two routes turn those rows into a live view:
+
+- **`GET /metrics`** — one SELECT over the last 500 events, rolled up into four
+  numbers: total diagnoses, how many got rate-limited (`429`), average latency,
+  and Groq requests left this minute.
+- **`GET /admin`** — a tiny HTML page that polls `/metrics` every 2 seconds.
+  Put it on a projector and watch the numbers tick.
+
+The `events` table has RLS on with **no** read policy for ordinary users, so it
+stays private automatically — only your `service_role` backend can read it. When
+a SELECT stops being enough, graduate to PostHog or Sentry. Not before.
+
+The payoff: under load, Groq's ~30 req/min cap returns a `429`, your `/diagnose`
+turns that into a graceful "you are in line", and the `429` count climbs on the
+dashboard. You can *see* the bottleneck, name it, and turn the one right knob
+(upgrade that single tier) — instead of blindly scaling a server that was never
+the problem.
+
+---
+
+## Step 9 — One product, one keystroke (the reveal)
+
+The architecture never moves — only what the product is *for*. The backend
+ships **two** system prompts and a flag:
+
+- `WORKFLOW_PROMPT` — diagnose a task you repeat at work (where we started).
+- `JOURNEY_PROMPT` — diagnose where a builder is, the gap to where they want to
+  go, and their single current bottleneck.
+
+`PROMPT_MODE` picks one. Its boot default comes from an env var, but you flip it
+**live, in memory, with no redeploy** (a redeploy risks a cold start at the
+worst moment):
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/admin/mode?mode=journey'
+```
+
+Same auth, same RLS, same deploy, same dashboard. Only the prompt changed. That
+is the whole lesson: once you own the shape — a thin UI, a backend that guards
+the secret, a model that thinks, a database that remembers, identity, privacy,
+a public address, and eyes on it — changing what a product *does* is a one-line
+change.
+
+---
+
 ## Where to go next
 
 - Change the **system prompt** in `main.py` to make the AI an expert in
