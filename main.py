@@ -5,7 +5,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from groq import Groq, RateLimitError
 from supabase import create_client
 
@@ -174,3 +174,64 @@ def get_messages(conversation_id: str):
         .execute()
     )
     return result.data
+
+
+@app.get("/metrics")
+def metrics():
+    """The whole dashboard, in one SELECT.
+
+    Read the last 500 events and roll them up into the four numbers that matter:
+    how many diagnoses, how many got rate-limited, average latency, and how much
+    Groq budget is left. No Mixpanel, no Datadog — the same database, one query.
+    (This runs on the service_role backend, which bypasses RLS, so it can read
+    the otherwise-private events table.)
+    """
+    rows = (
+        supabase.table("events")
+        .select("status, latency_ms, groq_remaining_rpm, created_at")
+        .order("created_at", desc=True)
+        .limit(500)
+        .execute()
+        .data
+    )
+    total = len(rows)
+    rate_limited = sum(1 for r in rows if r["status"] == 429)
+    avg_latency = round(sum(r["latency_ms"] or 0 for r in rows) / total) if total else 0
+    # The most recent reading of "requests left this minute".
+    remaining = next(
+        (r["groq_remaining_rpm"] for r in rows if r["groq_remaining_rpm"] is not None),
+        None,
+    )
+    return JSONResponse({
+        "total": total,
+        "rate_limited": rate_limited,
+        "avg_latency_ms": avg_latency,
+        "groq_remaining_rpm": remaining,
+    })
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin():
+    """A tiny live dashboard for the projector. It polls /metrics every 2s.
+
+    Numbers ticking up in real time — that's the whole point. Put this on the
+    big screen and you can watch your own product hit the rate limit, then
+    watch the queue drain after you turn the one right knob.
+    """
+    return """
+    <html><body style="font-family:system-ui;text-align:center;padding:3rem">
+      <h1 id="t">0</h1><p>diagnoses</p>
+      <h2 id="e">0</h2><p>in line (429)</p>
+      <h2 id="l">0 ms</h2><p>avg latency</p>
+      <h2 id="g">-</h2><p>Groq requests left this minute</p>
+      <script>
+        async function tick(){
+          const m = await (await fetch('/metrics')).json();
+          t.textContent = m.total; e.textContent = m.rate_limited;
+          l.textContent = m.avg_latency_ms + ' ms';
+          g.textContent = m.groq_remaining_rpm ?? '-';
+        }
+        setInterval(tick, 2000); tick();
+      </script>
+    </body></html>
+    """
