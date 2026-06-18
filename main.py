@@ -6,7 +6,7 @@ from typing import Optional
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import PlainTextResponse
-from groq import Groq
+from groq import Groq, RateLimitError
 from supabase import create_client
 
 # Read SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GROQ_API_KEY from the .env file
@@ -127,8 +127,21 @@ def diagnose(body: dict, user_id: Optional[str] = Depends(get_user_id)):
         "content": user_content,
     }).execute()
 
-    # 3. think (the L06 logic, now also handing back metrics)
-    plan, meta = call_groq(user_content)
+    # 3. think (the L06 logic, now also handing back metrics).
+    #    This is where the real tripwire lives: Groq's free tier allows only
+    #    ~30 requests/min. If 250 people press "diagnose" at once, most get a
+    #    429. We catch it and return a graceful "you are in line" — a queue
+    #    state, not a crash — and log the 429 so it shows up on the dashboard.
+    try:
+        plan, meta = call_groq(user_content)
+    except RateLimitError:
+        latency_ms = int((time.time() - started) * 1000)
+        log_event("/diagnose", 429, latency_ms, user_id)
+        return PlainTextResponse(
+            "You are in line. The model is at its limit right now. "
+            "Try again in a few seconds.",
+            status_code=429,
+        )
 
     # 4. store what the model answered
     supabase.table("messages").insert({
