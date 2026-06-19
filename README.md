@@ -552,6 +552,14 @@ That is the mirror of the RLS lesson from Step 7: RLS protects the *public* edge
 when your trusted backend acts on a user's behalf with the master key, *it* is the
 guard. (Starting a fresh thread is just a page reload — the `gr.State` resets.)
 
+The same reasoning closes the last open door. `GET /conversations/{id}/messages`
+used to read back *any* conversation by id with no passport at all — fine as a
+"memory survives" demo in Step 7, but a leak once real users arrived. It now
+requires a login and runs the **same ownership check** as the write path (both
+call one `assert_conversation_owner` helper), so you can only read your own
+threads. Every place that takes a conversation id from an untrusted caller now
+passes through that one guard.
+
 ## Where to go next
 
 - Change the **system prompt** in `main.py` to make the AI an expert in

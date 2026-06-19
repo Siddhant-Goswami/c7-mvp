@@ -158,29 +158,34 @@ def log_event(route, status, latency_ms, user_id=None, meta=None):
     }).execute()
 
 
-def resolve_conversation(conversation_id, user_id, first_message):
-    """Either continue an existing thread or open a new one.
+def assert_conversation_owner(conversation_id, user_id):
+    """Refuse unless `conversation_id` belongs to `user_id`. Raises 403 otherwise.
 
-    If the caller passes a `conversation_id`, it MUST be one of their own. We
-    check that here, in code, because this backend holds the `service_role` key
-    — which BYPASSES RLS. The database guards (db/03_policies.sql) that would
-    normally stop you reading someone else's row do not fire for service_role,
-    so the responsibility lands on us: a forged or borrowed id must be refused,
-    or one user could graft messages onto another's conversation. The master
-    key skips the guards, so the code holding it inherits their job.
+    This check lives in code, not in the database, because this backend holds the
+    `service_role` key — which BYPASSES RLS. The guards in db/03_policies.sql that
+    would normally stop you touching someone else's row do not fire for
+    service_role, so the responsibility lands on us. The master key skips the
+    guards, so the code holding it inherits their job. Every place that takes a
+    conversation id from an untrusted caller must pass through here.
+    """
+    owner = (
+        supabase.table("conversations")
+        .select("user_id")
+        .eq("id", conversation_id)
+        .execute()
+        .data
+    )
+    if not owner or owner[0]["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="That conversation isn't yours.")
+
+
+def resolve_conversation(conversation_id, user_id, first_message):
+    """Either continue an existing thread (if the caller owns it) or open a new one.
 
     Returns the conversation id to use.
     """
     if conversation_id:
-        owner = (
-            supabase.table("conversations")
-            .select("user_id")
-            .eq("id", conversation_id)
-            .execute()
-            .data
-        )
-        if not owner or owner[0]["user_id"] != user_id:
-            raise HTTPException(status_code=403, detail="That conversation isn't yours.")
+        assert_conversation_owner(conversation_id, user_id)
         return conversation_id
 
     # No id -> open a new conversation, titled with the first thing they said.
@@ -260,12 +265,19 @@ def diagnose(body: dict, user_id: str = Depends(require_user_id)):
 
 
 @app.get("/conversations/{conversation_id}/messages")
-def get_messages(conversation_id: str):
+def get_messages(conversation_id: str, user_id: str = Depends(require_user_id)):
     """Read a conversation's history back — the proof that memory survives.
 
     Restart the server, then call this endpoint: the messages are still here,
     because they live on disk in Postgres, not in this process's RAM.
+
+    This endpoint takes a conversation id straight from the URL, so it is exactly
+    the kind of untrusted input that needs a guard. It was the last open door:
+    until now anyone could read ANY conversation just by guessing its id, because
+    service_role bypasses RLS. We close it the same way as the write path —
+    require a passport, then confirm the conversation is the caller's own.
     """
+    assert_conversation_owner(conversation_id, user_id)
     result = (
         supabase.table("messages")
         .select("role, content, created_at")
