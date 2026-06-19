@@ -268,10 +268,43 @@ are structured.
 
 ---
 
-## Step 6 — Deploy it (optional)
+## Step 6 — Deploy it, right-sized (find the real bottleneck)
 
-Want it live on the internet? Deploy the two halves separately. One free,
-common combo:
+It's perfect on localhost and useless to the world. The interesting question
+isn't *how* to ship — it's *how big* to build. This is where most people
+over-engineer: they reach for Kubernetes, autoscaling, a load balancer, Redis,
+a queue… for an app nobody is using yet.
+
+**Do the napkin math first.** Say we expect ~250 users, a few diagnoses each.
+That's maybe 500–1,000 requests total, a few thousand short rows, a few
+megabytes. Now hold that next to the free-tier ceilings:
+
+| Layer | Free-tier ceiling that matters | Our 250-user load | Headroom |
+| --- | --- | --- | --- |
+| Supabase Postgres | ~500 MB (≈ 5M short messages) | a few MB | a rounding error |
+| Supabase Auth | 50,000 monthly active users | 250 | ~0.5% of the ceiling |
+| Groq LLM (`llama-3.3-70b-versatile`) | ~30 requests/min, ~1,000/day | 250 people clicking at once | **this is the one** |
+
+**Conclusion, derived not asserted:** we need *none* of the things people
+reach for. Over-engineering is paying in complexity for load you don't have.
+
+**The limit that breaks you first is never the one you'd guess.** It isn't users
+and it isn't storage. There are exactly two tripwires for this stack, and both
+live *outside your own code*:
+
+1. **The free database falls asleep** after ~7 days of no traffic and takes
+   ~30 seconds to wake. That's an *operational* tripwire, not a scale one. The
+   fix is a daily ping that keeps it warm, not a bigger plan.
+2. **The LLM rate limit** is the one that bites in a real launch. ~30
+   requests/min means if all 250 users press *diagnose* in the same minute,
+   only 30 get through and the rest get a `429`. Your bottleneck is an external
+   dependency. The fix is to throttle, queue, or upgrade *that one tier* — not
+   to scale your box.
+
+> Numbers move. Reconfirm on Groq's rate-limit docs and Supabase's pricing page
+> before you architect around any specific cap.
+
+Now deploy the two halves separately.
 
 ### Backend → Render
 
@@ -281,7 +314,8 @@ common combo:
    ```bash
    uvicorn main:app --host 0.0.0.0 --port $PORT
    ```
-4. Under **Environment**, add `GROQ_API_KEY` = your key.
+4. Under **Environment**, add three variables: `GROQ_API_KEY`, `SUPABASE_URL`,
+   and `SUPABASE_SERVICE_ROLE_KEY` (the same values from your `.env`).
 5. Deploy. Render gives you a URL like
    `https://your-service.onrender.com`. Your endpoint is that URL + `/diagnose`.
 
@@ -296,6 +330,11 @@ common combo:
 4. The Space builds and gives you a public chat link to share.
 
 Now anyone can use your app, and your key never leaves Render.
+
+> **Keep it warm.** Free hosts and the free database both sleep on idle, so the
+> first request after a quiet spell is slow. Before a live demo, hit the URL
+> once to wake it. For the database's 7-day pause, a tiny daily cron that calls
+> `/` is enough — you're mitigating the exact tripwire you just learned to name.
 
 ---
 
@@ -365,6 +404,62 @@ The work is split into small, readable files. Read them in order:
 > backend's `.env` / Render env vars and bypasses every rule. `anon` is the
 > public key meant for frontends; it is safe *only because* RLS guards every row.
 > Never put `service_role` anywhere a browser can see it.
+
+---
+
+## Step 8 — See it working (observability)
+
+It's live. Is it working? For whom? How fast? When it breaks at 2am, what do
+you even look at? Right now: nothing. The Verifier's Rule, one level up — only
+**ship what you can observe.**
+
+And it needs **no new infrastructure.** The same Postgres is your analytics
+warehouse. Run `db/04_events.sql` to add one `events` table, then every
+`/diagnose` logs a row: latency, tokens, status, and how much Groq budget is
+left (read straight from Groq's rate-limit header).
+
+Two routes turn those rows into a live view:
+
+- **`GET /metrics`** — one SELECT over the last 500 events, rolled up into four
+  numbers: total diagnoses, how many got rate-limited (`429`), average latency,
+  and Groq requests left this minute.
+- **`GET /admin`** — a tiny HTML page that polls `/metrics` every 2 seconds.
+  Put it on a projector and watch the numbers tick.
+
+The `events` table has RLS on with **no** read policy for ordinary users, so it
+stays private automatically — only your `service_role` backend can read it. When
+a SELECT stops being enough, graduate to PostHog or Sentry. Not before.
+
+The payoff: under load, Groq's ~30 req/min cap returns a `429`, your `/diagnose`
+turns that into a graceful "you are in line", and the `429` count climbs on the
+dashboard. You can *see* the bottleneck, name it, and turn the one right knob
+(upgrade that single tier) — instead of blindly scaling a server that was never
+the problem.
+
+---
+
+## Step 9 — One product, one keystroke (the reveal)
+
+The architecture never moves — only what the product is *for*. The backend
+ships **two** system prompts and a flag:
+
+- `WORKFLOW_PROMPT` — diagnose a task you repeat at work (where we started).
+- `JOURNEY_PROMPT` — diagnose where a builder is, the gap to where they want to
+  go, and their single current bottleneck.
+
+`PROMPT_MODE` picks one. Its boot default comes from an env var, but you flip it
+**live, in memory, with no redeploy** (a redeploy risks a cold start at the
+worst moment):
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/admin/mode?mode=journey'
+```
+
+Same auth, same RLS, same deploy, same dashboard. Only the prompt changed. That
+is the whole lesson: once you own the shape — a thin UI, a backend that guards
+the secret, a model that thinks, a database that remembers, identity, privacy,
+a public address, and eyes on it — changing what a product *does* is a one-line
+change.
 
 ---
 
