@@ -53,6 +53,22 @@ def get_user_id(authorization: Optional[str] = Header(default=None)) -> Optional
     return res.user.id
 
 
+def require_user_id(user_id: Optional[str] = Depends(get_user_id)) -> str:
+    """Same passport check, but now MANDATORY.
+
+    `get_user_id` stayed optional so the L06 narrative held: no token -> no
+    user, and the thin frontend still worked. That optionality is exactly the
+    open door — anyone with no passport still got served. Once the frontend can
+    log a person in, we close it: no token -> 401, full stop. A bad token was
+    already rejected upstream; this only adds "and a MISSING token is rejected
+    too." The service_role backend itself is unaffected; this guards the public
+    HTTP edge, where the untrusted callers are.
+    """
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Please log in first.")
+    return user_id
+
+
 # ---------------------------------------------------------------------------
 #  Two prompts, one machine. The architecture never moves — only what the
 #  product is FOR. Changing that is a one-line change, because we own the
@@ -137,7 +153,7 @@ def log_event(route, status, latency_ms, user_id=None, meta=None):
 
 
 @app.post("/diagnose", response_class=PlainTextResponse)
-def diagnose(body: dict, user_id: Optional[str] = Depends(get_user_id)):
+def diagnose(body: dict, user_id: str = Depends(require_user_id)):
     user_content = body.get("workflow_description", "")
     started = time.time()  # start the stopwatch so we can log latency
 

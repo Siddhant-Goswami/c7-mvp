@@ -463,6 +463,57 @@ change.
 
 ---
 
+## Step 10 — Lock the door (the login flow)
+
+Until now the frontend sent no passport, so `/diagnose` served *anyone*. The
+database was private (RLS guards every row), but the API in front of it was
+wide open. Time to put a login on the front.
+
+We do **not** build a users table or hash passwords. Supabase Auth already
+runs `auth.users` for us. The frontend just asks it to sign someone up or log
+them in, using the **public anon key**. That key is safe in a browser for one
+reason only: RLS. It opens the door to a building where every shelf has its
+own guard.
+
+Two moving parts:
+
+1. **The frontend grows a login gate** (`app_frontend.py`). Before the chat
+   appears, the user logs in or signs up. Supabase hands back an
+   `access_token` (a JWT). We keep it for the session and attach it to every
+   backend call as `Authorization: Bearer <token>`.
+
+   ```python
+   supabase.auth.sign_in_with_password({"email": email, "password": password})
+   # ...later, on the chat call:
+   requests.post(BACKEND_URL, json=..., headers={"Authorization": f"Bearer {token}"})
+   ```
+
+   With **Confirm email** turned on in Supabase, sign-up sends a verification
+   email and returns *no* session until the user clicks the link. The UI says
+   "check your email, then log in." (Turn confirmation off and sign-up logs
+   them straight in.)
+
+2. **The backend now requires that passport** (`main.py`). `get_user_id` stayed
+   optional through the early lessons, which was the open door. A new
+   `require_user_id` dependency closes it: no token returns `401`, full stop.
+   A forged or expired token was already rejected. The `service_role` backend
+   is untouched; we are guarding the public HTTP edge, where the untrusted
+   callers live.
+
+```bash
+# No passport now bounces:
+curl -i -X POST http://127.0.0.1:8000/diagnose \
+  -H 'Content-Type: application/json' \
+  -d '{"workflow_description": "I copy numbers between two sheets"}'
+# -> HTTP/1.1 401 Unauthorized   {"detail":"Please log in first."}
+```
+
+You need one new value in `.env` for the frontend: `SUPABASE_ANON_KEY` (the
+publishable key from Settings -> API). The `service_role` key stays
+server-only, exactly as before.
+
+---
+
 ## Where to go next
 
 - Change the **system prompt** in `main.py` to make the AI an expert in
