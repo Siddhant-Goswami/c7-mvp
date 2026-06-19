@@ -107,8 +107,14 @@ def current_system_prompt() -> str:
     return JOURNEY_PROMPT if PROMPT_MODE == "journey" else WORKFLOW_PROMPT
 
 
-def call_groq(user_content: str):
-    """The L06 brain, now wearing a meter.
+def call_groq(turns):
+    """The L06 brain, now wearing a meter — and with a memory of the thread.
+
+    `turns` is the conversation so far: a list of {"role", "content"} dicts,
+    oldest first, ending with the user's newest message. We prepend the system
+    prompt and hand the whole thing to the model, so a follow-up like "make that
+    simpler" knows what "that" refers to. (Before this step the model saw only
+    the single latest message, so it had no memory within a session.)
 
     Returns (text, meta). `meta` carries the numbers the dashboard needs:
     how many tokens we spent, and — crucially — how many requests Groq will
@@ -121,7 +127,7 @@ def call_groq(user_content: str):
         max_tokens=1024,
         messages=[
             {"role": "system", "content": current_system_prompt()},
-            {"role": "user", "content": user_content},
+            *turns,
         ],
     )
     # Groq reports your remaining budget in a response header.
@@ -152,20 +158,51 @@ def log_event(route, status, latency_ms, user_id=None, meta=None):
     }).execute()
 
 
+def resolve_conversation(conversation_id, user_id, first_message):
+    """Either continue an existing thread or open a new one.
+
+    If the caller passes a `conversation_id`, it MUST be one of their own. We
+    check that here, in code, because this backend holds the `service_role` key
+    — which BYPASSES RLS. The database guards (db/03_policies.sql) that would
+    normally stop you reading someone else's row do not fire for service_role,
+    so the responsibility lands on us: a forged or borrowed id must be refused,
+    or one user could graft messages onto another's conversation. The master
+    key skips the guards, so the code holding it inherits their job.
+
+    Returns the conversation id to use.
+    """
+    if conversation_id:
+        owner = (
+            supabase.table("conversations")
+            .select("user_id")
+            .eq("id", conversation_id)
+            .execute()
+            .data
+        )
+        if not owner or owner[0]["user_id"] != user_id:
+            raise HTTPException(status_code=403, detail="That conversation isn't yours.")
+        return conversation_id
+
+    # No id -> open a new conversation, titled with the first thing they said.
+    convo = supabase.table("conversations").insert(
+        {"title": first_message[:60], "user_id": user_id}
+    ).execute()
+    return convo.data[0]["id"]
+
+
 @app.post("/diagnose", response_class=PlainTextResponse)
 def diagnose(body: dict, user_id: str = Depends(require_user_id)):
     user_content = body.get("workflow_description", "")
+    conversation_id = body.get("conversation_id")  # present on a follow-up turn
     started = time.time()  # start the stopwatch so we can log latency
 
-    # Four beats: open a conversation, store the question, think, store the answer.
-    # We wrap MEMORY around last week's brain — we don't replace it.
+    # Five beats: pick the thread, store the question, recall the thread, think,
+    # store the answer. The thread is what turns a pile of one-shot Q+As into a
+    # real conversation the model can follow.
 
-    # 1. open a conversation (the domain-model "conversation" gets a row).
-    #    Stamp it with the caller's user_id from the JWT, so we know who owns it.
-    convo = supabase.table("conversations").insert(
-        {"title": user_content[:60], "user_id": user_id}
-    ).execute()
-    conversation_id = convo.data[0]["id"]
+    # 1. continue the caller's thread, or open a new one (with the ownership
+    #    check that service_role's RLS-bypass forces us to make ourselves).
+    conversation_id = resolve_conversation(conversation_id, user_id, user_content)
 
     # 2. store what the user said
     supabase.table("messages").insert({
@@ -174,13 +211,28 @@ def diagnose(body: dict, user_id: str = Depends(require_user_id)):
         "content": user_content,
     }).execute()
 
-    # 3. think (the L06 logic, now also handing back metrics).
+    # 3. recall the thread so the model has context. This now includes the turn
+    #    we just inserted, so the list ends with the user's newest message.
+    #    Cap to the last 20 turns: a naive bound that keeps a long thread from
+    #    blowing the context window. (Smarter truncation is the next improvement.)
+    turns = (
+        supabase.table("messages")
+        .select("role, content")
+        .eq("conversation_id", conversation_id)
+        .order("created_at")
+        .limit(20)
+        .execute()
+        .data
+    )
+
+    # 4. think (the L06 logic, now also handing back metrics).
     #    This is where the real tripwire lives: Groq's free tier allows only
     #    ~30 requests/min. If 250 people press "diagnose" at once, most get a
     #    429. We catch it and return a graceful "you are in line" — a queue
     #    state, not a crash — and log the 429 so it shows up on the dashboard.
+    #    We still hand back the conversation id so the thread isn't orphaned.
     try:
-        plan, meta = call_groq(user_content)
+        plan, meta = call_groq(turns)
     except RateLimitError:
         latency_ms = int((time.time() - started) * 1000)
         log_event("/diagnose", 429, latency_ms, user_id)
@@ -188,9 +240,10 @@ def diagnose(body: dict, user_id: str = Depends(require_user_id)):
             "You are in line. The model is at its limit right now. "
             "Try again in a few seconds.",
             status_code=429,
+            headers={"X-Conversation-Id": conversation_id},
         )
 
-    # 4. store what the model answered
+    # 5. store what the model answered
     supabase.table("messages").insert({
         "conversation_id": conversation_id,
         "role": "assistant",

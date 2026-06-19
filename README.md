@@ -514,6 +514,44 @@ server-only, exactly as before.
 
 ---
 
+## Step 11 — Pick up the thread (conversation continuation)
+
+Until now every message started a **brand-new conversation**: `/diagnose`
+unconditionally inserted a fresh row and the model only ever saw your latest
+sentence. Ask a follow-up — "now make that simpler" — and it had no idea what
+"that" was. The domain model promised `conversation` → *many* `messages`, but in
+practice each conversation held exactly one Q+A.
+
+The fix is small. The frontend remembers a `conversation_id` for the browser
+session (a `gr.State`), sends it on every call, and the backend, on the first
+reply, hands one back in the `X-Conversation-Id` header. On later turns the
+backend **appends** to that thread and feeds the prior messages back to the model
+as context, so follow-ups finally make sense.
+
+```python
+# main.py — the model now sees the whole thread, not just the last line
+turns = (supabase.table("messages").select("role, content")
+         .eq("conversation_id", conversation_id).order("created_at")
+         .limit(20).execute().data)        # last 20 turns: a naive context cap
+plan, meta = call_groq(turns)
+```
+
+The sharp edge worth teaching: a follow-up sends a `conversation_id`, and this
+backend holds the **`service_role`** key, which **bypasses RLS**. The database
+guards that would normally stop you touching someone else's row *do not fire*
+here. So the backend has to check ownership **itself** — a forged or borrowed id
+is refused with a `403`:
+
+```python
+# the master key skips the guards, so the code holding it inherits their job
+if not owner or owner[0]["user_id"] != user_id:
+    raise HTTPException(status_code=403, detail="That conversation isn't yours.")
+```
+
+That is the mirror of the RLS lesson from Step 7: RLS protects the *public* edge;
+when your trusted backend acts on a user's behalf with the master key, *it* is the
+guard. (Starting a fresh thread is just a page reload — the `gr.State` resets.)
+
 ## Where to go next
 
 - Change the **system prompt** in `main.py` to make the AI an expert in

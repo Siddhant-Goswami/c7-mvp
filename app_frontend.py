@@ -89,27 +89,49 @@ def sign_up(email, password):
 #  The chat, now carrying the passport.
 # ---------------------------------------------------------------------------
 
-def diagnose(message, history, token):
+def diagnose(message, history, token, conversation_id):
+    """One chat turn. Carries two things besides the message:
+
+    - the JWT (`token`) — the passport that says who is asking;
+    - the `conversation_id` — which thread this belongs to. It is None on the
+      first message of a session; the backend then opens a new conversation and
+      hands the id back in the `X-Conversation-Id` header. We stash that id and
+      send it on every later turn, so follow-ups append to the SAME thread (and
+      the model gets the earlier turns as context) instead of starting fresh.
+
+    Returns (reply, conversation_id): the first element is the chat reply, the
+    second updates `convo_state` (wired up as an additional output below).
+    """
     if not token:
-        return "Your session expired. Please reload and log in again."
+        return "Your session expired. Please reload and log in again.", conversation_id
+    body = {"workflow_description": message}
+    if conversation_id:
+        body["conversation_id"] = conversation_id
     try:
         response = requests.post(
             BACKEND_URL,
-            json={"workflow_description": message},
+            json=body,
             # The passport. The backend hands this straight to Supabase to learn
             # who is asking — it never trusts a name in the request body.
             headers={"Authorization": f"Bearer {token}"},
             timeout=60,
         )
         response.raise_for_status()
-        return response.text
+        # Remember the thread the backend put us in (new id on turn one, the same
+        # id thereafter), so the next turn continues it.
+        new_id = response.headers.get("X-Conversation-Id", conversation_id)
+        return response.text, new_id
     except requests.RequestException as e:
-        return f"Could not reach the backend.\n\n{e}"
+        # Keep the existing thread id on error, so a hiccup doesn't fork the thread.
+        return f"Could not reach the backend.\n\n{e}", conversation_id
 
 
 with gr.Blocks(title="Workflow Diagnoser") as demo:
     # Holds the JWT for the length of the browser session.
     token_state = gr.State(None)
+    # Holds the current conversation's id. None until the first reply comes back;
+    # reset to None on page reload, which is how you start a fresh thread.
+    convo_state = gr.State(None)
 
     # ---- Login view (what you see first) ----
     with gr.Column(visible=True) as login_view:
@@ -128,7 +150,11 @@ with gr.Blocks(title="Workflow Diagnoser") as demo:
     with gr.Column(visible=False) as chat_view:
         gr.ChatInterface(
             diagnose,
-            additional_inputs=[token_state],
+            # Read the passport AND the current thread id...
+            additional_inputs=[token_state, convo_state],
+            # ...and let diagnose() write the thread id back, so the next turn
+            # continues the same conversation.
+            additional_outputs=[convo_state],
             title="Workflow Diagnoser",
             description="Describe one repeated task you do at work.",
         )
