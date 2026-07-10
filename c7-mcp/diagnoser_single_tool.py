@@ -47,6 +47,42 @@ def search_web(query: str) -> dict:
                          include_answer=True)
 
 
+# ---------------------------------------------------------------------------
+# The contract: the Exercise 2 shape, in the form the Groq API expects,
+# passed as a FIRST-CLASS tools input — never mixed into the system prompt.
+# Name: specific and verb-like. Description: says WHEN, because the model
+# routes from this text alone. `required` is what lets the model ask a
+# follow-up instead of guessing when a field is missing.
+# ---------------------------------------------------------------------------
+
+TOOLS = [{
+    "type": "function",
+    "function": {
+        "name": "search_web",
+        "description": ("Search the web for current information. ALWAYS "
+                        "call this first when diagnosing a workflow: the "
+                        "plan must name tools that exist today, and only "
+                        "a search can know them."),
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string",
+                                     "description": "The search query"}},
+            "required": ["query"],
+        },
+    },
+}]
+
+
+def run_tools(name: str, args: dict):
+    """Execute layer: validate the decision, make the real call."""
+    print(f"  [tool call] {name}({args})")
+    if name == "search_web":
+        return search_web(**args)
+    # A decision you did not anticipate is an error you report,
+    # never a guess you execute.
+    return {"error": f"unknown tool: {name}"}
+
+
 if __name__ == "__main__":
     # Call the tool directly, as plain Python. No model involved: a query
     # string goes in, ranked results plus a ready answer come out.
