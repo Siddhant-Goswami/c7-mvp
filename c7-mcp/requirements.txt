@@ -1,3 +1,4 @@
+fastmcp
 groq
 tavily-python
 python-dotenv
