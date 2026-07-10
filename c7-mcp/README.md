@@ -84,3 +84,35 @@ git show mcp-step-4             # jump to any step's diff (tags: mcp-step-0 … 
 | 5 | Derive the loop: repeat until the model stops deciding |
 | 6 | The socket: `@mcp.tool`, and any MCP host can call it |
 | 7 | Ship it: deploy, connect to Claude, troubleshoot |
+
+## Exercise: predict, then run
+
+Route these on paper **first**, against `diagnoser.py`:
+
+1. "Diagnose my invoice approval process."
+2. "How many hours does a 40-minute daily task cost per year?"
+3. "Good morning."
+
+Which fires which tool; which fires nothing? If you cannot predict the
+routing, your descriptions are not done: **the description is the router.**
+
+Then strip the numbers from the hours question — *"How many hours does my
+daily standup cost per year?"* — and watch what happens. The schema marks
+both fields `required`, yet the model **invents** a standup length (15
+minutes, say) rather than asking you. You just met the rule again: **if you
+do not specify it, the LLM assumes it.** `required` forces the model to
+*provide* the field; only your prompt can tell it *where the value must come
+from*. Add one line to `SYSTEM_PROMPT` —
+
+> "If a calculation needs numbers the user has not given, ask for them;
+> never assume values."
+
+— re-run, and confirm the model now asks a follow-up instead of inventing
+minutes. One unspecified boundary, one line to specify it.
+
+**The loose thread.** The input side is now specified: schema, types,
+required fields. The output side stays open — generation is next-token
+prediction, and one stray quote can break a deterministic parser. Is a
+prompt alone enough to guarantee format? That is the homework rabbit hole,
+one level below MCP. Watch the socket closely: it quietly solves half of it
+on the input side.
