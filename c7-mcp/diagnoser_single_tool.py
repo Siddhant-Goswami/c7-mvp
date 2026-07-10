@@ -83,8 +83,45 @@ def run_tools(name: str, args: dict):
     return {"error": f"unknown tool: {name}"}
 
 
+# ---------------------------------------------------------------------------
+# One pass, no loop. The exchange as a straight line, exactly as it happens
+# on the wire: the model decides, we execute, the model answers.
+# ---------------------------------------------------------------------------
+
+def diagnose(workflow_description: str) -> str:
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user",   "content": workflow_description},
+    ]
+
+    # Pass 1: the model DECIDES (it cannot execute anything)
+    first = client.chat.completions.create(
+        model="qwen/qwen3-32b", messages=messages,
+        tools=TOOLS, tool_choice="auto",
+    ).choices[0].message
+
+    # WE execute the decision
+    call = first.tool_calls[0]
+    args = json.loads(call.function.arguments)
+    result = run_tools(call.function.name, args)
+
+    # Pass 2: result goes back in; the model answers, grounded
+    messages.append(first)
+    messages.append({"role": "tool", "tool_call_id": call.id,
+                     "content": json.dumps(result)})
+    final = client.chat.completions.create(
+        model="qwen/qwen3-32b", messages=messages, tools=TOOLS,
+    ).choices[0].message
+    return final.content
+
+
 if __name__ == "__main__":
-    # Call the tool directly, as plain Python. No model involved: a query
-    # string goes in, ranked results plus a ready answer come out.
-    results = search_web("best Jira to Slack automation tools")
-    print(json.dumps(results, indent=2)[:1500])
+    # The golden input from Lecture 10. Watch the trace: one search_web
+    # call with a sensible query, then a plan naming tools that exist
+    # this month. The model never touched the network — it read text and
+    # emitted a JSON decision; our Python made the real call.
+    plan = diagnose(
+        "I open Jira to check my weekly to dos, pick a high priority task, "
+        "create a report, and send it to my manager on Slack."
+    )
+    print("\n" + str(plan))
